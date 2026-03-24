@@ -18,27 +18,27 @@ PairSimilarity = tuple[str, str, float]
 
 
 def parse_args() -> argparse.Namespace:
-    """Считывает аргументы CLI."""
+    """Считывает аргументы командной строки."""
     parser = argparse.ArgumentParser(
-        description="Compare text files and print similarity percentages."
+        description="Сравнивает текстовые файлы и выводит процент похожести."
     )
     parser.add_argument(
         "--input-dir",
         type=Path,
         default=DEFAULT_INPUT_DIR,
-        help="Directory with .txt files (default: data/texts).",
+        help="Каталог с .txt файлами (по умолчанию: data/texts).",
     )
     parser.add_argument(
         "--shingle-size",
         type=int,
         default=DEFAULT_SHINGLE_SIZE,
-        help="Word shingle size (default: 2).",
+        help="Размер шингла в словах (по умолчанию: 2).",
     )
     parser.add_argument(
         "--top",
         type=int,
         default=DEFAULT_TOP_RESULTS,
-        help="How many best matching pairs to print (default: 10).",
+        help="Сколько лучших пар выводить (по умолчанию: 10).",
     )
     args = parser.parse_args()
     validate_args(args)
@@ -48,9 +48,9 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     """Проверяет аргументы запуска."""
     if args.shingle_size < 1:
-        raise ValueError("--shingle-size must be >= 1")
+        raise ValueError("Параметр --shingle-size должен быть >= 1")
     if args.top < 1:
-        raise ValueError("--top must be >= 1")
+        raise ValueError("Параметр --top должен быть >= 1")
 
 
 def normalize_text(raw_text: str) -> str:
@@ -85,13 +85,13 @@ def jaccard_similarity(left: set[str], right: set[str]) -> float:
 def read_txt_files(input_dir: Path) -> list[Document]:
     """Читает все .txt файлы из каталога."""
     if not input_dir.exists():
-        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+        raise FileNotFoundError(f"Каталог не найден: {input_dir}")
     if not input_dir.is_dir():
-        raise NotADirectoryError(f"Input path is not a directory: {input_dir}")
+        raise NotADirectoryError(f"Путь не является каталогом: {input_dir}")
 
     txt_paths = sorted(input_dir.glob("*.txt"))
     if len(txt_paths) < 2:
-        raise ValueError("Need at least 2 .txt files to compare.")
+        raise ValueError("Для сравнения нужно минимум 2 файла .txt.")
 
     return [(txt_path.name, txt_path.read_text(encoding="utf-8")) for txt_path in txt_paths]
 
@@ -120,9 +120,9 @@ def compare_documents(documents: Iterable[Document], shingle_size: int) -> list[
 
 def print_results(results: list[PairSimilarity], top: int) -> None:
     """Печатает top результатов."""
-    print("Top similarity pairs:")
+    print("Наиболее похожие пары:")
     print("-" * TABLE_WIDTH)
-    print(f"{'Doc A':<25} {'Doc B':<25} {'Similarity':>12}")
+    print(f"{'Файл 1':<25} {'Файл 2':<25} {'Похожесть':>12}")
     print("-" * TABLE_WIDTH)
 
     for name_a, name_b, score in results[:top]:
