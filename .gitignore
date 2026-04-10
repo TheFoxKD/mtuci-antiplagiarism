@@ -5,9 +5,23 @@
 .vscode/
 
 __pycache__/
+*.egg-info/
 *.py[cod]
 .pytest_cache/
+build/
+dist/
 
 .venv/
 venv/
 env/
+
+docs/superpowers/
+docs/private/
+
+# Крупные вложения в info/ — держать у себя или в docs/private/ (локально)
+info/*.pdf
+info/*.pptx
+
+# Локальный план и каталог specs (не в репозитории)
+superpowers/implementation-plan-full-app.md
+superpowers/specs/

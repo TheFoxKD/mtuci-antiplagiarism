@@ -1,0 +1,32 @@
+name: Windows
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: |
+          uv sync --group build
+          uv run pyinstaller --clean --noconfirm Antiplagiarism.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Antiplagiarism-${{ github.ref_name }}
+          path: dist/Antiplagiarism.exe
+      - if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Antiplagiarism.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
