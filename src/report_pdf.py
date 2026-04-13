@@ -152,19 +152,23 @@ def write_report_pdf(
         "Документ",
         "Оригинальность, %",
         "Наибольшая близость, %",
-        "Самый похожий файл",
+        "Самые похожие файлы",
     ]
     data = [headers]
     n = len(result.names)
     for i in range(n):
+        close = result.close_neighbor_indices[i]
         neighbor = ""
-        if 0 <= result.best_neighbor_index[i] < n:
-            neighbor = result.names[result.best_neighbor_index[i]]
+        if close:
+            neighbor = "; ".join(result.names[j] for j in close)
+        max_cell = f"{result.max_similarity[i]:.2f}"
+        if len(close) > 1:
+            max_cell = f"{max_cell} (+{len(close) - 1})"
         data.append(
             [
                 result.names[i],
                 f"{result.uniqueness_percent[i]:.2f}",
-                f"{result.max_similarity[i]:.2f}",
+                max_cell,
                 neighbor,
             ]
         )

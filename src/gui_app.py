@@ -74,7 +74,7 @@ METHOD_OPTIONS: list[tuple[SimilarityMethod, str, str]] = [
     (
         SimilarityMethod.LEVENSHTEIN,
         "Левенштейн (весь текст)",
-        "Текст целиком; у длинных работ возможна усечённая обработка — см. «*» в таблице.",
+        "Сравнение по полному нормализованному тексту как по одной длинной строке символов.",
     ),
 ]
 
@@ -245,15 +245,21 @@ def _similarity_method_from_combo(combo: QComboBox) -> SimilarityMethod | None:
     return None
 
 
-def _top_k_neighbor_indices(matrix: SimilarityResult, row: int, k: int) -> list[int]:
-    n = len(matrix.names)
+def _highlight_neighbor_indices(result: SimilarityResult, row: int, k: int) -> list[int]:
+    """
+    Соседи для окна подсветки: не меньше k, но если у строки несколько почти равных по % источников,
+    берём всех из этой связки (чтобы не терять второй «такой же» плагиат).
+    """
+    n = len(result.names)
     pairs: list[tuple[float, int]] = []
     for j in range(n):
         if j == row:
             continue
-        pairs.append((matrix.matrix_percent[row, j], j))
+        pairs.append((result.matrix_percent[row, j], j))
     pairs.sort(key=lambda x: -x[0])
-    return [j for _, j in pairs[: max(1, k)]]
+    tied_n = len(result.close_neighbor_indices[row])
+    need = max(k, tied_n)
+    return [j for _, j in pairs[:need]]
 
 
 class SimilarityWorker(QThread):
@@ -352,7 +358,7 @@ class HighlightDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Совпадающие фрагменты")
         self.resize(920, 540)
-        neigh_idx = _top_k_neighbor_indices(result, row, neighbor_k)
+        neigh_idx = _highlight_neighbor_indices(result, row, neighbor_k)
         f = entries[row]
         neigh_names = [result.names[j] for j in neigh_idx]
         names_line = ", ".join(neigh_names)
@@ -491,7 +497,10 @@ class MainWindow(QMainWindow):
         self.spin_K = QSpinBox()
         self.spin_K.setRange(1, 10)
         self.spin_K.setValue(1)
-        self.spin_K.setToolTip("Сколько самых похожих файлов учитывать в окне совпадений.")
+        self.spin_K.setToolTip(
+            "Минимум столько соседей в окне подсветки; если у строки несколько почти равных по % источников, "
+            "в подсветку попадут все они, даже при значении 1."
+        )
         self.spin_K.setStyleSheet(_SPIN_FIELD_STYLE)
         row2.addWidget(self.spin_K)
         row2.addStretch()
@@ -522,23 +531,36 @@ class MainWindow(QMainWindow):
         root.addWidget(self.progress)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(
             [
                 "Документ",
                 "Оригинальность, %",
                 "Наибольшая близость, %",
-                "Самый похожий файл",
-                "*",
+                "Самые похожие файлы",
             ]
         )
-        h_star = self.table.horizontalHeaderItem(4)
-        if h_star is not None:
-            h_star.setToolTip("У Левенштейна для очень длинных текстов — не вся длина; звёздочка это отмечает.")
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _hdr = self.table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _tips = [
+            "Имя файла (путь от выбранной папки, если есть вложенность).",
+            "100% минус максимальную близость к другому файлу; при нескольких почти равных источниках — дополнительный штраф.",
+            "Самая высокая похожесть с любым другим документом; число в скобках — сколько ещё источников почти на том же уровне.",
+            "Все соседи, у которых похожесть не ниже максимума минус небольшой порог (см. расчёт в similarity.py).",
+        ]
+        for _c, _t in enumerate(_tips):
+            _hi = self.table.horizontalHeaderItem(_c)
+            if _hi is not None:
+                _hi.setToolTip(_t)
         self.table.doubleClicked.connect(self._on_table_double_click)
         self.table.setAlternatingRowColors(True)
         root.addWidget(self.table)
+
+        # Строка «подозрительные»: несколько сильных источников у одного документа (по связке у максимума).
+        self._suspicious = QLabel("")
+        self._suspicious.setWordWrap(True)
+        self._suspicious.setStyleSheet("color: #92400e; padding: 2px 0 0 0; font-size: 12px;")
+        root.addWidget(self._suspicious)
 
         self._status = QLabel("Форматы: txt, md, docx, pdf с текстом.")
         self._status.setWordWrap(True)
@@ -623,20 +645,27 @@ class MainWindow(QMainWindow):
         n = len(res.names)
         self._status.setText(f"Готово. Сравнено документов: {n}.")
         self.table.setRowCount(n)
-        lev_m = res.levenshtein_prefix_used
+        flagged: list[str] = []
         for i in range(n):
+            close = res.close_neighbor_indices[i]
             neighbor = ""
-            if 0 <= res.best_neighbor_index[i] < n:
-                neighbor = res.names[res.best_neighbor_index[i]]
-            lev_star = ""
-            if lev_m is not None:
-                if any(lev_m[i, j] for j in range(n) if j != i):
-                    lev_star = "*"
+            if close:
+                neighbor = "; ".join(res.names[j] for j in close)
+            max_txt = f"{res.max_similarity[i]:.2f}"
+            if len(close) > 1:
+                max_txt = f"{max_txt} (+{len(close) - 1})"
+            if len(close) > 1:
+                flagged.append(res.names[i])
             self.table.setItem(i, 0, QTableWidgetItem(res.names[i]))
             self.table.setItem(i, 1, QTableWidgetItem(f"{res.uniqueness_percent[i]:.2f}"))
-            self.table.setItem(i, 2, QTableWidgetItem(f"{res.max_similarity[i]:.2f}"))
+            self.table.setItem(i, 2, QTableWidgetItem(max_txt))
             self.table.setItem(i, 3, QTableWidgetItem(neighbor))
-            self.table.setItem(i, 4, QTableWidgetItem(lev_star))
+        if flagged:
+            self._suspicious.setText(
+                "Несколько почти равных по величине источников у: " + "; ".join(flagged)
+            )
+        else:
+            self._suspicious.setText("")
         w = bundle["warnings"]
         if w:
             lines = "\n".join(f"{a}: {b}" for a, b in w[:30])
@@ -651,6 +680,7 @@ class MainWindow(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.progress.setValue(0)
+        self._suspicious.setText("")
         self._status.setText("Сравнение не завершено — см. сообщение выше.")
         QMessageBox.warning(self, "Сообщение", msg)
 

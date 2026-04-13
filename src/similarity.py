@@ -13,9 +13,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from text_normalize import jaccard_sets, text_to_shingles
 
-# Левенштейн: при большом произведении длин сравниваем префиксы
-LEV_LEN_PRODUCT_THRESHOLD = 2_500_000
-LEV_PREFIX_LEN = 4000
+# Соседи с похожестью не ниже (максимум − этот порог), % — считаем «такими же сильными»,
+# показываем всех в колонке и слегка снижаем оригинальность (несколько источников).
+NEIGHBOR_TIE_DELTA_PCT = 1.5
+# За каждого дополнительного соседа из этой «связки» вычитаем столько % от оригинальности (потолок ниже).
+EXTRA_TIE_PENALTY_PCT = 2.5
+EXTRA_TIE_PENALTY_CAP_PCT = 25.0
 
 
 class SimilarityMethod(str, Enum):
@@ -31,11 +34,11 @@ class SimilarityResult:
     # симметричная матрица n x n, проценты [0, 100], диагональ 100
     matrix_percent: np.ndarray
     names: list[str]
-    # только для метода Левенштейна: True если для пары (i,j) использовали префикс
-    levenshtein_prefix_used: np.ndarray | None
     # агрегаты по документу
     max_similarity: list[float]
     best_neighbor_index: list[int]
+    # индексы всех соседей с похожестью >= max − NEIGHBOR_TIE_DELTA_PCT, по убыванию % (для строки i)
+    close_neighbor_indices: list[list[int]]
     uniqueness_percent: list[float]
 
 
@@ -45,33 +48,52 @@ def _empty_result(names: list[str]) -> SimilarityResult:
     return SimilarityResult(
         matrix_percent=m,
         names=names,
-        levenshtein_prefix_used=None,
         max_similarity=[0.0] * n,
         best_neighbor_index=[-1] * n,
+        close_neighbor_indices=[[] for _ in range(n)],
         uniqueness_percent=[100.0] * n,
     )
 
 
-def _aggregates(matrix: np.ndarray) -> tuple[list[float], list[int], list[float]]:
-    """max по j!=i, индекс соседа, уникальность = 100 - max."""
+def _aggregates(
+    matrix: np.ndarray,
+    tie_delta: float = NEIGHBOR_TIE_DELTA_PCT,
+) -> tuple[list[float], list[int], list[list[int]], list[float]]:
+    """
+    Для каждой строки: максимум по соседям, лучший индекс, все «сильные» соседи (связка у максимума),
+    оригинальность: 100 − максимум и доп. штраф за каждого следующего из связки.
+    """
     n = matrix.shape[0]
     max_sim: list[float] = []
     best_j: list[int] = []
+    close_all: list[list[int]] = []
     uniq: list[float] = []
     for i in range(n):
-        best = -1.0
-        best_idx = -1
+        pairs: list[tuple[float, int]] = []
         for j in range(n):
             if i == j:
                 continue
-            v = matrix[i, j]
-            if v > best:
-                best = v
-                best_idx = j
-        max_sim.append(best if best >= 0 else 0.0)
-        best_j.append(best_idx)
-        uniq.append(100.0 - max_sim[-1])
-    return max_sim, best_j, uniq
+            pairs.append((float(matrix[i, j]), j))
+        if not pairs:
+            max_sim.append(0.0)
+            best_j.append(-1)
+            close_all.append([])
+            uniq.append(100.0)
+            continue
+        pairs.sort(key=lambda x: -x[0])
+        mval = pairs[0][0]
+        bidx = pairs[0][1]
+        close = [j for s, j in pairs if s >= mval - tie_delta]
+        max_sim.append(mval)
+        best_j.append(bidx)
+        close_all.append(close)
+        extras = len(close) - 1
+        if extras <= 0:
+            uniq.append(100.0 - mval)
+        else:
+            penalty = min(EXTRA_TIE_PENALTY_CAP_PCT, EXTRA_TIE_PENALTY_PCT * extras)
+            uniq.append(max(0.0, 100.0 - mval - penalty))
+    return max_sim, best_j, close_all, uniq
 
 
 def compute_similarity(
@@ -92,9 +114,9 @@ def compute_similarity(
         return SimilarityResult(
             matrix_percent=np.zeros((0, 0)),
             names=[],
-            levenshtein_prefix_used=None,
             max_similarity=[],
             best_neighbor_index=[],
+            close_neighbor_indices=[],
             uniqueness_percent=[],
         )
 
@@ -120,13 +142,13 @@ def compute_similarity(
                 p = 100.0 * jacc
                 matrix[i, j] = p
                 matrix[j, i] = p
-        ms, bj, uq = _aggregates(matrix)
+        ms, bj, cl, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
-            levenshtein_prefix_used=None,
             max_similarity=ms,
             best_neighbor_index=bj,
+            close_neighbor_indices=cl,
             uniqueness_percent=uq,
         )
 
@@ -147,29 +169,23 @@ def compute_similarity(
         np.fill_diagonal(sim, 0.0)
         matrix = 100.0 * np.clip(sim, 0.0, 1.0)
         np.fill_diagonal(matrix, 100.0)
-        ms, bj, uq = _aggregates(matrix)
+        ms, bj, cl, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
-            levenshtein_prefix_used=None,
             max_similarity=ms,
             best_neighbor_index=bj,
+            close_neighbor_indices=cl,
             uniqueness_percent=uq,
         )
 
     if method == SimilarityMethod.LEVENSHTEIN:
-        prefix_used = np.zeros((n, n), dtype=bool)
         matrix = np.eye(n) * 100.0
         for i in range(n):
             for j in range(i + 1, n):
                 tick()
                 a = normalized_texts[i]
                 b = normalized_texts[j]
-                used_prefix = False
-                if len(a) * len(b) > LEV_LEN_PRODUCT_THRESHOLD:
-                    a = a[:LEV_PREFIX_LEN]
-                    b = b[:LEV_PREFIX_LEN]
-                    used_prefix = True
                 la, lb = len(a), len(b)
                 if la == 0 and lb == 0:
                     p = 100.0
@@ -181,15 +197,13 @@ def compute_similarity(
                     p = 100.0 * max(0.0, min(1.0, sim))
                 matrix[i, j] = p
                 matrix[j, i] = p
-                prefix_used[i, j] = used_prefix
-                prefix_used[j, i] = used_prefix
-        ms, bj, uq = _aggregates(matrix)
+        ms, bj, cl, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
-            levenshtein_prefix_used=prefix_used,
             max_similarity=ms,
             best_neighbor_index=bj,
+            close_neighbor_indices=cl,
             uniqueness_percent=uq,
         )
 
