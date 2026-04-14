@@ -390,25 +390,25 @@ class HighlightDialog(QDialog):
         te_f.setReadOnly(True)
         te_f.setHtml(html_document_body(hl.inner_html))
 
+        # Делаем легенду кликабельной: по клику на имя соседа справа открывается именно этот файл.
         leg_bits = " ".join(
             f'<span style="background-color:{col}; padding:2px 8px; margin-right:6px; border-radius:3px">'
-            f"{html_module.escape(name)}</span>"
-            for name, col in hl.legend
+            f'<a href="{idx}" style="color:#0f172a; text-decoration:none;">{html_module.escape(name)}</a></span>'
+            for idx, (name, col) in enumerate(hl.legend)
         )
         leg = QLabel(f"<b>Цвета:</b> {leg_bits}")
         leg.setTextFormat(Qt.TextFormat.RichText)
+        leg.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        leg.setOpenExternalLinks(False)
         layout.addWidget(leg)
 
         te_g = QTextEdit()
         te_g.setReadOnly(True)
-        # показываем первого соседа целиком
-        g = entries[neigh_idx[0]]
-        te_g.setPlainText(g.raw_text)
 
         row_h = QHBoxLayout()
         lh = QLabel("<b>Этот файл</b>")
         lh.setTextFormat(Qt.TextFormat.RichText)
-        rh = QLabel(f"<b>Файл для сравнения:</b> {html_module.escape(g.name)}")
+        rh = QLabel("<b>Файл для сравнения:</b>")
         rh.setTextFormat(Qt.TextFormat.RichText)
         row_h.addWidget(lh)
         row_h.addStretch()
@@ -419,6 +419,24 @@ class HighlightDialog(QDialog):
         panes.addWidget(te_f)
         panes.addWidget(te_g)
         layout.addLayout(panes)
+
+        def _show_neighbor_by_pos(pos: int) -> None:
+            if pos < 0 or pos >= len(neigh_idx):
+                return
+            g = entries[neigh_idx[pos]]
+            te_g.setPlainText(g.raw_text)
+            rh.setText(f"<b>Файл для сравнения:</b> {html_module.escape(g.name)}")
+
+        def _on_legend_link(link: str) -> None:
+            try:
+                _show_neighbor_by_pos(int(link))
+            except ValueError:
+                return
+
+        leg.linkActivated.connect(_on_legend_link)
+        # По умолчанию показываем первого соседа целиком.
+        _show_neighbor_by_pos(0)
+
         if method == SimilarityMethod.LEVENSHTEIN:
             layout.addWidget(
                 QLabel(
