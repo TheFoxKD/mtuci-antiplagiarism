@@ -157,18 +157,17 @@ def write_report_pdf(
     data = [headers]
     n = len(result.names)
     for i in range(n):
-        close = result.close_neighbor_indices[i]
-        neighbor = ""
-        if close:
-            neighbor = "; ".join(result.names[j] for j in close)
-        max_cell = f"{result.max_similarity[i]:.2f}"
-        if len(close) > 1:
-            max_cell = f"{max_cell} (+{len(close) - 1})"
+        significant = result.significant_neighbor_indices[i]
+        if significant:
+            parts = [f"{result.names[j]} ({result.matrix_percent[i, j]:.2f}%)" for j in significant]
+            neighbor = "; ".join(parts)
+        else:
+            neighbor = "нет значимых совпадений"
         data.append(
             [
                 result.names[i],
                 f"{result.uniqueness_percent[i]:.2f}",
-                max_cell,
+                f"{result.max_similarity[i]:.2f}",
                 neighbor,
             ]
         )

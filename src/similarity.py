@@ -13,12 +13,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from text_normalize import jaccard_sets, text_to_shingles
 
-# Соседи с похожестью не ниже (максимум − этот порог), % — считаем «такими же сильными»,
-# показываем всех в колонке и слегка снижаем оригинальность (несколько источников).
-NEIGHBOR_TIE_DELTA_PCT = 1.5
-# За каждого дополнительного соседа из этой «связки» вычитаем столько % от оригинальности (потолок ниже).
-EXTRA_TIE_PENALTY_PCT = 2.5
-EXTRA_TIE_PENALTY_CAP_PCT = 25.0
+# Порог «значимого» источника для вывода в таблице и отчёте.
+SIGNIFICANT_SIMILARITY_PCT = 20.0
 
 
 class SimilarityMethod(str, Enum):
@@ -37,8 +33,8 @@ class SimilarityResult:
     # агрегаты по документу
     max_similarity: list[float]
     best_neighbor_index: list[int]
-    # индексы всех соседей с похожестью >= max − NEIGHBOR_TIE_DELTA_PCT, по убыванию % (для строки i)
-    close_neighbor_indices: list[list[int]]
+    # индексы всех соседей с похожестью >= SIGNIFICANT_SIMILARITY_PCT, по убыванию % (для строки i)
+    significant_neighbor_indices: list[list[int]]
     uniqueness_percent: list[float]
 
 
@@ -50,23 +46,23 @@ def _empty_result(names: list[str]) -> SimilarityResult:
         names=names,
         max_similarity=[0.0] * n,
         best_neighbor_index=[-1] * n,
-        close_neighbor_indices=[[] for _ in range(n)],
+        significant_neighbor_indices=[[] for _ in range(n)],
         uniqueness_percent=[100.0] * n,
     )
 
 
 def _aggregates(
     matrix: np.ndarray,
-    tie_delta: float = NEIGHBOR_TIE_DELTA_PCT,
+    significant_threshold: float = SIGNIFICANT_SIMILARITY_PCT,
 ) -> tuple[list[float], list[int], list[list[int]], list[float]]:
     """
-    Для каждой строки: максимум по соседям, лучший индекс, все «сильные» соседи (связка у максимума),
-    оригинальность: 100 − максимум и доп. штраф за каждого следующего из связки.
+    Для каждой строки: максимум по соседям, лучший индекс, все «значимые» соседи (>= порога),
+    оригинальность: 100 − максимум.
     """
     n = matrix.shape[0]
     max_sim: list[float] = []
     best_j: list[int] = []
-    close_all: list[list[int]] = []
+    significant_all: list[list[int]] = []
     uniq: list[float] = []
     for i in range(n):
         pairs: list[tuple[float, int]] = []
@@ -77,23 +73,18 @@ def _aggregates(
         if not pairs:
             max_sim.append(0.0)
             best_j.append(-1)
-            close_all.append([])
+            significant_all.append([])
             uniq.append(100.0)
             continue
         pairs.sort(key=lambda x: -x[0])
         mval = pairs[0][0]
         bidx = pairs[0][1]
-        close = [j for s, j in pairs if s >= mval - tie_delta]
+        significant = [j for s, j in pairs if s >= significant_threshold]
         max_sim.append(mval)
         best_j.append(bidx)
-        close_all.append(close)
-        extras = len(close) - 1
-        if extras <= 0:
-            uniq.append(100.0 - mval)
-        else:
-            penalty = min(EXTRA_TIE_PENALTY_CAP_PCT, EXTRA_TIE_PENALTY_PCT * extras)
-            uniq.append(max(0.0, 100.0 - mval - penalty))
-    return max_sim, best_j, close_all, uniq
+        significant_all.append(significant)
+        uniq.append(max(0.0, 100.0 - mval))
+    return max_sim, best_j, significant_all, uniq
 
 
 def compute_similarity(
@@ -116,7 +107,7 @@ def compute_similarity(
             names=[],
             max_similarity=[],
             best_neighbor_index=[],
-            close_neighbor_indices=[],
+            significant_neighbor_indices=[],
             uniqueness_percent=[],
         )
 
@@ -142,13 +133,13 @@ def compute_similarity(
                 p = 100.0 * jacc
                 matrix[i, j] = p
                 matrix[j, i] = p
-        ms, bj, cl, uq = _aggregates(matrix)
+        ms, bj, sg, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
             max_similarity=ms,
             best_neighbor_index=bj,
-            close_neighbor_indices=cl,
+            significant_neighbor_indices=sg,
             uniqueness_percent=uq,
         )
 
@@ -169,13 +160,13 @@ def compute_similarity(
         np.fill_diagonal(sim, 0.0)
         matrix = 100.0 * np.clip(sim, 0.0, 1.0)
         np.fill_diagonal(matrix, 100.0)
-        ms, bj, cl, uq = _aggregates(matrix)
+        ms, bj, sg, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
             max_similarity=ms,
             best_neighbor_index=bj,
-            close_neighbor_indices=cl,
+            significant_neighbor_indices=sg,
             uniqueness_percent=uq,
         )
 
@@ -197,13 +188,13 @@ def compute_similarity(
                     p = 100.0 * max(0.0, min(1.0, sim))
                 matrix[i, j] = p
                 matrix[j, i] = p
-        ms, bj, cl, uq = _aggregates(matrix)
+        ms, bj, sg, uq = _aggregates(matrix)
         return SimilarityResult(
             matrix_percent=matrix,
             names=names,
             max_similarity=ms,
             best_neighbor_index=bj,
-            close_neighbor_indices=cl,
+            significant_neighbor_indices=sg,
             uniqueness_percent=uq,
         )
 
