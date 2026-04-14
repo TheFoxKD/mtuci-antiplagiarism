@@ -13,8 +13,15 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from text_normalize import jaccard_sets, text_to_shingles
 
-# Порог «значимого» источника для вывода в таблице и отчёте.
+# Порог «явно высокой» похожести: такие источники всегда попадают в список, если максимум по строке >= этому уровню.
 SIGNIFICANT_SIMILARITY_PCT = 20.0
+# Если максимум по строке ниже порога (типично мозаика в Жаккаре/TF‑IDF), в таблицу берём топ‑K соседей по убыванию %.
+FALLBACK_TOP_NEIGHBORS_WHEN_WEAK_MAX = 4
+# При уже «сильном» максимуме (>= SIGNIFICANT_SIMILARITY_PCT) добавляем соседей близко к нему (ловим несколько источников у смешанного текста).
+RELATIVE_BAND_WHEN_STRONG_MAX_PCT = 12.0
+MIN_PAIR_PERCENT_FOR_RELATIVE_BAND = 3.0
+# Потолок длины списка источников в таблице (защита от шума в больших корпусах).
+MAX_NEIGHBORS_LISTED = 8
 
 
 class SimilarityMethod(str, Enum):
@@ -33,7 +40,7 @@ class SimilarityResult:
     # агрегаты по документу
     max_similarity: list[float]
     best_neighbor_index: list[int]
-    # индексы всех соседей с похожестью >= SIGNIFICANT_SIMILARITY_PCT, по убыванию % (для строки i)
+    # Индексы соседей для колонки «источники»: по убыванию %; правило см. _display_neighbor_indices_for_row.
     significant_neighbor_indices: list[list[int]]
     uniqueness_percent: list[float]
 
@@ -51,12 +58,42 @@ def _empty_result(names: list[str]) -> SimilarityResult:
     )
 
 
+def _display_neighbor_indices_for_row(
+    pairs_sorted_desc: list[tuple[float, int]],
+    mval: float,
+    *,
+    significant_threshold: float = SIGNIFICANT_SIMILARITY_PCT,
+) -> list[int]:
+    """
+    Кого показывать в таблице как «источники» для одной строки матрицы.
+
+    - Если максимум по строке ниже порога (типично кусковой плагиат): топ‑K соседей по %.
+    - Если максимум высокий: все с % >= порогу, плюс соседи в полосе (макс − RELATIVE_BAND), с нижним полом.
+    """
+    if not pairs_sorted_desc:
+        return []
+    if mval < significant_threshold:
+        k = min(FALLBACK_TOP_NEIGHBORS_WHEN_WEAK_MAX, len(pairs_sorted_desc))
+        return [j for _, j in pairs_sorted_desc[:k]]
+    out: list[int] = []
+    seen: set[int] = set()
+    band_floor = mval - RELATIVE_BAND_WHEN_STRONG_MAX_PCT
+    for s, j in pairs_sorted_desc:
+        if len(out) >= MAX_NEIGHBORS_LISTED:
+            break
+        if s >= significant_threshold or (s >= band_floor and s >= MIN_PAIR_PERCENT_FOR_RELATIVE_BAND):
+            if j not in seen:
+                seen.add(j)
+                out.append(j)
+    return out
+
+
 def _aggregates(
     matrix: np.ndarray,
     significant_threshold: float = SIGNIFICANT_SIMILARITY_PCT,
 ) -> tuple[list[float], list[int], list[list[int]], list[float]]:
     """
-    Для каждой строки: максимум по соседям, лучший индекс, все «значимые» соседи (>= порога),
+    Для каждой строки: максимум по соседям, лучший индекс, список источников для таблицы,
     оригинальность: 100 − максимум.
     """
     n = matrix.shape[0]
@@ -79,10 +116,12 @@ def _aggregates(
         pairs.sort(key=lambda x: -x[0])
         mval = pairs[0][0]
         bidx = pairs[0][1]
-        significant = [j for s, j in pairs if s >= significant_threshold]
+        display_neighbors = _display_neighbor_indices_for_row(
+            pairs, mval, significant_threshold=significant_threshold
+        )
         max_sim.append(mval)
         best_j.append(bidx)
-        significant_all.append(significant)
+        significant_all.append(display_neighbors)
         uniq.append(max(0.0, 100.0 - mval))
     return max_sim, best_j, significant_all, uniq
 

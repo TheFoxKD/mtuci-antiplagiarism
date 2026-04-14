@@ -247,8 +247,8 @@ def _similarity_method_from_combo(combo: QComboBox) -> SimilarityMethod | None:
 
 def _highlight_neighbor_indices(result: SimilarityResult, row: int, k: int) -> list[int]:
     """
-    Соседи для окна подсветки: значимые источники (>= порога) + при пустом списке fallback.
-    Всегда возвращаем как минимум одного соседа, чтобы окно не было пустым.
+    Соседи для окна подсветки: тот же список, что в таблице (significant_neighbor_indices),
+    плюс при большем k — следующие по убыванию похожести.
     """
     n = len(result.names)
     pairs: list[tuple[float, int]] = []
@@ -257,10 +257,23 @@ def _highlight_neighbor_indices(result: SimilarityResult, row: int, k: int) -> l
             continue
         pairs.append((result.matrix_percent[row, j], j))
     pairs.sort(key=lambda x: -x[0])
-    significant_n = len(result.significant_neighbor_indices[row])
-    # Если значимых нет — показываем хотя бы одного лучшего для наглядности.
-    need = max(1, k if significant_n == 0 else max(k, significant_n))
-    return [j for _, j in pairs[:need]]
+    listed = result.significant_neighbor_indices[row]
+    if not listed:
+        return [j for _, j in pairs[: max(1, k)]]
+    need = max(k, len(listed))
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for j in listed:
+        if j not in seen:
+            seen.add(j)
+            ordered.append(j)
+    for _, j in pairs:
+        if len(ordered) >= need:
+            break
+        if j not in seen:
+            seen.add(j)
+            ordered.append(j)
+    return ordered
 
 
 class SimilarityWorker(QThread):
@@ -372,18 +385,30 @@ class HighlightDialog(QDialog):
         layout.addWidget(cap)
 
         neighbors_norm = [entries[j].normalized for j in neigh_idx]
+        pair_scores = [float(result.matrix_percent[row, j]) for j in neigh_idx]
 
         if method == SimilarityMethod.JACCARD_SHINGLE:
             hl = highlight_jaccard_multi_with_legend(
-                f.raw_text, f.normalized, neighbors_norm, shingle_k, neigh_names
+                f.raw_text,
+                f.normalized,
+                neighbors_norm,
+                shingle_k,
+                neigh_names,
+                neighbor_pair_scores=pair_scores,
             )
         elif method == SimilarityMethod.TFIDF_COSINE:
             hl = highlight_tfidf_multi_with_legend(
-                f.raw_text, corpus_norm, row, neigh_idx, neigh_names, top_n=30
+                f.raw_text,
+                corpus_norm,
+                row,
+                neigh_idx,
+                neigh_names,
+                top_n=30,
+                neighbor_pair_scores=pair_scores,
             )
         else:
             hl = highlight_levenshtein_multi_with_legend(
-                f.normalized, neighbors_norm, neigh_names
+                f.normalized, neighbors_norm, neigh_names, neighbor_pair_scores=pair_scores
             )
 
         te_f = QTextEdit()
@@ -517,8 +542,8 @@ class MainWindow(QMainWindow):
         self.spin_K.setRange(1, 10)
         self.spin_K.setValue(1)
         self.spin_K.setToolTip(
-            "Минимум столько соседей в окне подсветки. Если есть несколько значимых источников (>= 20%), "
-            "в подсветку попадут все они, даже при значении 1."
+            "Минимум столько соседей в окне подсветки. В подсветку входят те же источники, что в таблице, "
+            "плюс при необходимости следующие по убыванию похожести."
         )
         self.spin_K.setStyleSheet(_SPIN_FIELD_STYLE)
         row2.addWidget(self.spin_K)
@@ -555,7 +580,7 @@ class MainWindow(QMainWindow):
             [
                 "Документ",
                 "Оригинальность, %",
-                "Наибольшая близость, %",
+                "Близость к источникам, %",
                 "Самые похожие файлы",
             ]
         )
@@ -564,8 +589,9 @@ class MainWindow(QMainWindow):
         _tips = [
             "Имя файла (путь от выбранной папки, если есть вложенность).",
             "100% минус максимальную близость к другому файлу.",
-            "Самая высокая похожесть с любым другим документом.",
-            "Все соседи с похожестью не ниже 20%; для каждого указан его процент.",
+            "Проценты попарной похожести в том же порядке, что имена в соседней колонке (по убыванию).",
+            "Источники по правилам similarity.py: при низком максимуме — топ нескольких соседей; "
+            "при высоком — порог 20% и полоса у максимума.",
         ]
         for _c, _t in enumerate(_tips):
             _hi = self.table.horizontalHeaderItem(_c)
@@ -575,7 +601,7 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         root.addWidget(self.table)
 
-        # Строка «подозрительные»: у документа несколько значимых источников (>= 20%).
+        # Строка «подозрительные»: у документа в таблице указано несколько источников.
         self._suspicious = QLabel("")
         self._suspicious.setWordWrap(True)
         self._suspicious.setStyleSheet("color: #92400e; padding: 2px 0 0 0; font-size: 12px;")
@@ -668,19 +694,20 @@ class MainWindow(QMainWindow):
         for i in range(n):
             significant = res.significant_neighbor_indices[i]
             if significant:
-                parts = [f"{res.names[j]} ({res.matrix_percent[i, j]:.2f}%)" for j in significant]
-                neighbor = "; ".join(parts)
+                pct_cell = "; ".join(f"{res.matrix_percent[i, j]:.2f}" for j in significant)
+                neighbor = "; ".join(res.names[j] for j in significant)
             else:
-                neighbor = "нет значимых совпадений"
+                pct_cell = "—"
+                neighbor = "—"
             if len(significant) > 1:
                 flagged.append(res.names[i])
             self.table.setItem(i, 0, QTableWidgetItem(res.names[i]))
             self.table.setItem(i, 1, QTableWidgetItem(f"{res.uniqueness_percent[i]:.2f}"))
-            self.table.setItem(i, 2, QTableWidgetItem(f"{res.max_similarity[i]:.2f}"))
+            self.table.setItem(i, 2, QTableWidgetItem(pct_cell))
             self.table.setItem(i, 3, QTableWidgetItem(neighbor))
         if flagged:
             self._suspicious.setText(
-                "Несколько значимых источников (>= 20%) у: " + "; ".join(flagged)
+                "Несколько источников в списке у: " + "; ".join(flagged)
             )
         else:
             self._suspicious.setText("")

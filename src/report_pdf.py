@@ -151,7 +151,7 @@ def write_report_pdf(
     headers = [
         "Документ",
         "Оригинальность, %",
-        "Наибольшая близость, %",
+        "Близость к источникам, %",
         "Самые похожие файлы",
     ]
     data = [headers]
@@ -159,15 +159,16 @@ def write_report_pdf(
     for i in range(n):
         significant = result.significant_neighbor_indices[i]
         if significant:
-            parts = [f"{result.names[j]} ({result.matrix_percent[i, j]:.2f}%)" for j in significant]
-            neighbor = "; ".join(parts)
+            pct_cell = "; ".join(f"{result.matrix_percent[i, j]:.2f}" for j in significant)
+            neighbor = "; ".join(result.names[j] for j in significant)
         else:
-            neighbor = "нет значимых совпадений"
+            pct_cell = "—"
+            neighbor = "—"
         data.append(
             [
                 result.names[i],
                 f"{result.uniqueness_percent[i]:.2f}",
-                f"{result.max_similarity[i]:.2f}",
+                pct_cell,
                 neighbor,
             ]
         )

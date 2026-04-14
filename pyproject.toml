@@ -28,3 +28,10 @@ py-modules = ["gui_entry"]
 # PyInstaller: uv sync --group build && uv run pyinstaller Antiplagiarism.spec
 [dependency-groups]
 build = ["pyinstaller>=6.0"]
+dev = [
+    "pytest>=9.0.3",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -74,6 +74,63 @@ def _merge_neighbor_token_owners(per_neighbor: list[set[int]], n_tokens: int) ->
     return out
 
 
+def _merge_token_owners_by_pair_scores(
+    per_neighbor: list[set[int]],
+    n_tokens: int,
+    pair_scores: list[float],
+) -> list[int | None]:
+    """
+    Конфликт цветов: токен подсвечен у нескольких соседей — выигрывает больший % пары из матрицы
+    (как в таблице), при равенстве — меньший индекс в списке соседей окна.
+    """
+    out: list[int | None] = [None] * n_tokens
+    for i in range(n_tokens):
+        owners = [j for j, s in enumerate(per_neighbor) if i in s]
+        if owners:
+            out[i] = max(owners, key=lambda j: (pair_scores[j], -j))
+    return out
+
+
+def _jaccard_multi_token_owners_by_shingle_vote(
+    raw_f: str,
+    normalized_f: str,
+    neighbors_norm: list[str],
+    shingle_k: int,
+    neighbor_pair_scores: list[float] | None = None,
+) -> list[int | None]:
+    """
+    Раскраска по соседям без «забора» всех токенов первым: для каждого токена считаем,
+    сколько общих шинглов с данным соседем содержат это слово; побеждает сосед с большим счётом,
+    при равенстве — более похожий (меньший индекс в списке).
+    """
+    spans = _token_spans(raw_f)
+    nt = _normalized_tokens_from_spans(spans)
+    n_tok = len(nt)
+    if n_tok == 0:
+        return []
+    if not neighbors_norm:
+        return [None] * n_tok
+    n_nei = len(neighbors_norm)
+    tie = neighbor_pair_scores if neighbor_pair_scores is not None else [0.0] * n_nei
+    scores = [[0] * n_tok for _ in range(n_nei)]
+    for j, ng in enumerate(neighbors_norm):
+        sf = text_to_shingles(normalized_f, shingle_k)
+        sg = text_to_shingles(ng, shingle_k)
+        common = sf & sg
+        for sh in common:
+            words_in_sh = set(sh.split())
+            for i, t in enumerate(nt):
+                if t in words_in_sh:
+                    scores[j][i] += 1
+    owners: list[int | None] = [None] * n_tok
+    for i in range(n_tok):
+        candidates = [j for j in range(n_nei) if scores[j][i] > 0]
+        if candidates:
+            # больше совпавших шинглов; при равенстве — больший % пары из матрицы, затем меньший индекс
+            owners[i] = max(candidates, key=lambda j: (scores[j][i], tie[j], -j))
+    return owners
+
+
 def _wrap_html_by_token_owner(text: str, token_owner: list[int | None]) -> str:
     """Подсветка с разными цветами по индексу соседа (0..K-1)."""
     spans = _token_spans(text)
@@ -234,12 +291,17 @@ def _lcs_word_indices(a: list[str], b: list[str]) -> set[int]:
     return use_i
 
 
+# LCS по словам для подсветки — O(n·m); лимит защищает UI от зависаний на огромных текстах.
+# Метрика Левенштейна в similarity.py считает по полному тексту; здесь только визуализация.
+LEVENSHTEIN_LCS_MAX_WORDS = 2500
+
+
 def _levenshtein_lcs_word_indices(normalized_f: str, normalized_g: str, min_run: int) -> set[int]:
     wf = normalized_f.split()
     wg = normalized_g.split()
-    if len(wf) > 800 or len(wg) > 800:
-        wf = wf[:800]
-        wg = wg[:800]
+    if len(wf) > LEVENSHTEIN_LCS_MAX_WORDS or len(wg) > LEVENSHTEIN_LCS_MAX_WORDS:
+        wf = wf[:LEVENSHTEIN_LCS_MAX_WORDS]
+        wg = wg[:LEVENSHTEIN_LCS_MAX_WORDS]
     lcs_i = _lcs_word_indices(wf, wg)
     highlight: set[int] = set()
     current: list[int] = []
@@ -294,13 +356,58 @@ def highlight_jaccard_multi_with_legend(
     neighbors_norm: list[str],
     shingle_k: int,
     neighbor_names: list[str],
+    neighbor_pair_scores: list[float] | None = None,
 ) -> HighlightWithLegend:
-    """Топ-K соседей: разные цвета; при пересечении токена — цвет более похожего соседа."""
-    per = [_jaccard_highlight_indices(raw_f, normalized_f, ng, shingle_k) for ng in neighbors_norm]
-    n_tok = len(_token_spans(raw_f))
-    owners = _merge_neighbor_token_owners(per, n_tok)
+    """Топ-K соседей: разные цвета; пересечения делим по числу общих шинглов на слово (голосование)."""
+    owners = _jaccard_multi_token_owners_by_shingle_vote(
+        raw_f, normalized_f, neighbors_norm, shingle_k, neighbor_pair_scores
+    )
     inner = _wrap_html_by_token_owner(raw_f, owners)
     return HighlightWithLegend(inner_html=inner, legend=_legend_entries(neighbor_names))
+
+
+def _tfidf_multi_token_owners_by_feature_vote(
+    raw_f: str,
+    corpus_normalized: list[str],
+    index_f: int,
+    neighbor_indices: list[int],
+    top_n: int,
+    neighbor_pair_scores: list[float] | None = None,
+) -> list[int | None]:
+    """
+    Несколько соседей в TF-IDF: вес совпадающего признака (tf_f·tf_g) делим между соседями по токенам,
+    чтобы второй и третий источник не «съедались» первым при равной бинарной маске.
+    """
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1)
+    x = vec.fit_transform(corpus_normalized)
+    names = vec.get_feature_names_out()
+    row_f = x[index_f].toarray().ravel()
+    spans = _token_spans(raw_f)
+    nt = _normalized_tokens_from_spans(spans)
+    n_tok = len(nt)
+    n_nei = len(neighbor_indices)
+    if n_tok == 0 or n_nei == 0:
+        return [None] * n_tok
+    tie = neighbor_pair_scores if neighbor_pair_scores is not None else [0.0] * n_nei
+    scores = [[0.0] * n_tok for _ in range(n_nei)]
+    order = np.argsort(row_f)[::-1]
+    for ji, j in enumerate(neighbor_indices):
+        row_g = x[j].toarray().ravel()
+        for feat_i in order[:top_n]:
+            if row_f[feat_i] <= 0 or row_g[feat_i] <= 0:
+                continue
+            w = float(row_f[feat_i] * row_g[feat_i])
+            for part in names[feat_i].split():
+                pn = normalize_text(part)
+                for ti, t in enumerate(nt):
+                    if t == pn:
+                        scores[ji][ti] += w
+    owners: list[int | None] = [None] * n_tok
+    for i in range(n_tok):
+        candidates = [jj for jj in range(n_nei) if scores[jj][i] > 0]
+        if candidates:
+            owners[i] = max(candidates, key=lambda jj: (scores[jj][i], tie[jj], -jj))
+    return owners
 
 
 def highlight_tfidf_multi_with_legend(
@@ -310,13 +417,11 @@ def highlight_tfidf_multi_with_legend(
     neighbor_indices: list[int],
     neighbor_names: list[str],
     top_n: int = 30,
+    neighbor_pair_scores: list[float] | None = None,
 ) -> HighlightWithLegend:
-    per = [
-        _tfidf_highlight_indices(raw_f, corpus_normalized, index_f, j, top_n)
-        for j in neighbor_indices
-    ]
-    n_tok = len(_token_spans(raw_f))
-    owners = _merge_neighbor_token_owners(per, n_tok)
+    owners = _tfidf_multi_token_owners_by_feature_vote(
+        raw_f, corpus_normalized, index_f, neighbor_indices, top_n, neighbor_pair_scores
+    )
     inner = _wrap_html_by_token_owner(raw_f, owners)
     return HighlightWithLegend(inner_html=inner, legend=_legend_entries(neighbor_names))
 
@@ -326,10 +431,14 @@ def highlight_levenshtein_multi_with_legend(
     neighbors_norm: list[str],
     neighbor_names: list[str],
     min_run: int = 2,
+    neighbor_pair_scores: list[float] | None = None,
 ) -> HighlightWithLegend:
     wf = normalized_f.split()
     per = [_levenshtein_lcs_word_indices(normalized_f, ng, min_run) for ng in neighbors_norm]
-    owners = _merge_neighbor_token_owners(per, len(wf))
+    if neighbor_pair_scores is not None:
+        owners = _merge_token_owners_by_pair_scores(per, len(wf), neighbor_pair_scores)
+    else:
+        owners = _merge_neighbor_token_owners(per, len(wf))
     inner = _wrap_normalized_words_colored(wf, owners)
     return HighlightWithLegend(inner_html=inner, legend=_legend_entries(neighbor_names))
 
